@@ -1,0 +1,113 @@
+
+USE_IMAGE_SPECTRA = true;
+
+% setup paths
+addpath('util');
+addpath('Bullwinkle');
+addpath('signature_detectors');
+
+% load one of the campus images
+load muufl_gulfport_campus_w_lidar_1;
+load E_efumi_gulfport4all.mat;
+%load muufl_gulfport_campus_3.mat;
+
+if USE_IMAGE_SPECTRA
+
+    % load the target signatures
+    load tgt_img_spectra; % order: brown, dark green, faux vineyard green, pea green
+    
+    % setup some target filters for scoring (see Bullwinkle/BullwinkleParameters.m for more info)
+    filt_pg_3 = { {'pea green',[],[],[]} };
+    filt_all = { {{'brown','pea green','dark green','faux vineyard green'},[],[],[]} };
+    
+    %target_sigs = tgt_img_spectra.spectra;
+    target_sigs = E_efumi_gulfport4;
+
+
+
+else    
+    % load lab spectra, resample to image bands
+    load tgt_lab_spectra;
+    lab_tgt_inds = [4 2 3 5]; %br,dg,vg,pg
+    
+    img_wvl = hsi.info.wavelength;
+    n_band = numel(img_wvl);
+    
+    lab_wvl = spectralSignatures(1).wavelengths;
+    img_lab_inds = zeros(n_band,1);
+    for i=1:numel(img_wvl)
+        [~,img_lab_inds(i)] = min(abs(lab_wvl - img_wvl(i)));
+    end
+    
+    target_sigs = zeros(n_band,numel(lab_tgt_inds));
+    for i=1:numel(lab_tgt_inds)
+        target_sigs(:,i) = spectralSignatures(lab_tgt_inds(i)).reflectance(img_lab_inds);
+    end
+    
+    filt_pg_3 = { {'brown',3,[],[]} };
+    filt_all = { {{'brown','pea green','dark green','vineyard green'},[],[],[]} };
+      % note this uses vineyard green instead of faux vineyard green      
+end
+
+% pull out the hyperspectral image data, ensure it is double precision
+hsi_img = double(hsi.Data);
+
+%----------------------------------------------------------------
+% run some detectors on just pea green targets
+ace_out_pg = ace_detector(hsi_img,target_sigs(:,4),hsi.valid_mask);
+smf_out_pg = smf_detector(hsi_img,target_sigs(:,4),hsi.valid_mask);
+
+% score the detectors
+ace_score = score_hylid_perpixel(hsi,ace_out_pg,filt_pg_3,'ACE','det_fig',10,'roc_fig',11);
+smf_score = score_hylid_perpixel(hsi,smf_out_pg,filt_pg_3,'SMF','det_fig',15,'clims',[0 10],'roc_fig',16);
+
+%----------------------------------------------------------------
+
+%----------------------------------------------------------------
+% run some detectors on all of the targets
+out{1} = ace_ss_detector(hsi_img,target_sigs,hsi.valid_mask);
+out{2} = smf_max_detector(hsi_img,target_sigs,hsi.valid_mask);
+
+score{1} = score_hylid_perpixel(hsi,out{1},filt_all,'ACE','det_fig',100);
+score{2} = score_hylid_perpixel(hsi,out{2},filt_all,'SMF','det_fig',101,'clims',[0 10]);
+
+figure(103);
+PlotBullwinkleRoc(score,'detectors','xlim',[1e-5 1e-3]);
+
+figure(104);
+PlotBullwinkleRoc(score,'detectors','scale','log');
+
+%----------------------------------------------------------------
+
+max_far = 1e-3;
+auc = auc_upto_far(max_far, score{2});
+fprintf('AUC (FAR <= %.1e) = %.4f\n', max_far, auc);
+
+
+% ===== 修改点 2：导出 Figure 103 的 ROC 数据为 mat =====
+disp(' ');
+disp('正在导出 Figure 103 的 ROC 数据 ...');
+
+roc_data = struct();
+method_names = {'ACE_SS', 'SMF_MAX'};
+
+for i = 1:numel(score)
+    bw = score{i}.Bullwinkle;
+    pds  = vertcat(bw{:,2});   % PD
+    fars = vertcat(bw{:,3});   % FAR
+    
+    roc_data.(method_names{i}).FAR = fars;
+    roc_data.(method_names{i}).PD  = pds;
+    roc_data.(method_names{i}).name = score{i}.name;
+    roc_data.(method_names{i}).pAUC_1e3 = auc_upto_far(1e-3, score{i});
+end
+
+roc_data.xlimm = [0 1e-3];
+roc_data.scale = 'linear';
+
+save('Figure103_efumi_ROC_data.mat', '-struct', 'roc_data');
+disp('已保存: Figure103_efumi_ROC_data.mat');
+
+% 同时保存原始 score cell，方便后续直接用 PlotBullwinkleRoc 重画
+save('Figure103_efumi_score_backup.mat', 'score');
+disp('已备份 score 结构: Figure103_efumi_score_backup.mat');
